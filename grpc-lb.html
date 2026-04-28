@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gRPC 負載平衡機制解析</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1f2937; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+        .no-select { user-select: none; }
+        
+        .server-bar { transition: height 0.3s ease, background-color 0.3s ease; }
+        .pulse-red { animation: pulseRed 1.5s infinite; }
+        @keyframes pulseRed { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
+    </style>
+</head>
+<body class="bg-gray-900 text-white font-sans h-screen overflow-hidden flex no-select">
+
+    <!-- 側邊控制欄 -->
+    <div class="w-80 bg-gray-800 flex flex-col shadow-2xl z-20 border-r border-gray-700 flex-shrink-0">
+        <div class="p-6 pb-4 border-b border-gray-700">
+            <h1 class="text-xl font-bold text-cyan-400 flex items-center leading-tight">
+                <svg class="w-6 h-6 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                gRPC Load Balancing
+            </h1>
+            <p class="text-gray-400 text-xs mt-2">展示 gRPC 長連線特性如何導致 L4 LB 流量失衡，以及各種現代解法的運作原理。</p>
+        </div>
+
+        <div class="p-6 flex-1 flex flex-col overflow-y-auto">
+            <!-- 模式選擇 -->
+            <div class="space-y-3 mb-6">
+                <button id="btn-l4" class="protocol-btn w-full text-left px-4 py-3 rounded-lg bg-red-600/80 text-white font-semibold transition-all shadow-md border border-red-500 text-sm">
+                    1. 傳統 L4 LB (連線層級) - ⚠️ 問題展示
+                </button>
+                <button id="btn-l7" class="protocol-btn w-full text-left px-4 py-3 rounded-lg bg-gray-700 text-gray-300 hover:bg-gray-600 transition-all border border-transparent text-sm">
+                    2. L7 LB (請求層級 / Proxy)
+                </button>
+                <button id="btn-client" class="protocol-btn w-full text-left px-4 py-3 rounded-lg bg-gray-700 text-gray-300 hover:bg-gray-600 transition-all border border-transparent text-sm">
+                    3. Client-side LB (胖客戶端)
+                </button>
+                <button id="btn-mesh" class="protocol-btn w-full text-left px-4 py-3 rounded-lg bg-gray-700 text-gray-300 hover:bg-gray-600 transition-all border border-transparent text-sm">
+                    4. Service Mesh (Sidecar 模式)
+                </button>
+            </div>
+
+            <!-- 說明面板 -->
+            <div class="flex-1 bg-gray-900 rounded-xl p-5 border border-gray-700 shadow-inner overflow-y-auto">
+                <h2 id="desc-title" class="text-lg font-bold mb-3 text-red-400">傳統 L4 Load Balancer (TCP層)</h2>
+                <p id="desc-text" class="text-gray-300 leading-relaxed text-xs">
+                    L4 LB 只看 IP 和 Port，以「TCP 連線 (Connection)」為單位進行分配。<br><br>
+                    因為 gRPC 基於 HTTP/2，會**重用同一條長連線 (Keep-Alive)**。一旦連線建立，客戶端所有的 gRPC Request 都會沿著這條「唯一的水管」湧向同一台後端伺服器 (Server A)。<br><br>
+                    結果：Server A 被打爆，Server B 和 C 卻閒置，完全失去負載平衡的作用！
+                </p>
+            </div>
+        </div>
+
+        <div class="p-6 border-t border-gray-700 bg-gray-800">
+            <!-- 負載狀態指示器 -->
+            <div class="mb-4 flex justify-between items-end h-16 gap-2" id="load-meters">
+                <div class="flex-1 flex flex-col items-center justify-end">
+                    <div class="text-[10px] text-gray-400 mb-1">Server A</div>
+                    <div class="w-full bg-gray-700 rounded-t-md relative overflow-hidden h-12">
+                        <div id="meter-a" class="absolute bottom-0 left-0 right-0 bg-emerald-500 server-bar h-0"></div>
+                    </div>
+                </div>
+                <div class="flex-1 flex flex-col items-center justify-end">
+                    <div class="text-[10px] text-gray-400 mb-1">Server B</div>
+                    <div class="w-full bg-gray-700 rounded-t-md relative overflow-hidden h-12">
+                        <div id="meter-b" class="absolute bottom-0 left-0 right-0 bg-emerald-500 server-bar h-0"></div>
+                    </div>
+                </div>
+                <div class="flex-1 flex flex-col items-center justify-end">
+                    <div class="text-[10px] text-gray-400 mb-1">Server C</div>
+                    <div class="w-full bg-gray-700 rounded-t-md relative overflow-hidden h-12">
+                        <div id="meter-c" class="absolute bottom-0 left-0 right-0 bg-emerald-500 server-bar h-0"></div>
+                    </div>
+                </div>
+            </div>
+
+            <button id="btn-start" class="w-full bg-cyan-600 hover:bg-cyan-500 py-3 rounded-lg font-bold text-base transition-all shadow-[0_0_15px_rgba(8,145,178,0.4)] text-white">
+                發送大量 gRPC 請求 ▶
+            </button>
+        </div>
+    </div>
+
+    <!-- 畫布與視覺化區域 -->
+    <div class="flex-1 relative bg-gray-950 flex flex-col" id="canvas-container">
+        
+        <!-- 架構圖例 -->
+        <div class="absolute top-6 left-1/2 transform -translate-x-1/2 flex flex-wrap justify-center gap-4 z-10 bg-gray-800/90 px-6 py-3 rounded-full backdrop-blur-md border border-gray-600 shadow-xl text-xs font-medium">
+            <div class="flex items-center"><div class="w-3 h-1 bg-gray-500 mr-2"></div>TCP 連線</div>
+            <div class="flex items-center"><div class="w-2.5 h-2.5 rounded-full bg-cyan-400 mr-2"></div>gRPC 請求 (Stream)</div>
+            <div class="flex items-center"><div class="w-2.5 h-2.5 rounded-full bg-emerald-400 mr-2 border border-emerald-200"></div>負載均衡決策點</div>
+        </div>
+
+        <canvas id="simulationCanvas" class="w-full h-full block z-10 relative"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simulationCanvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('canvas-container');
+        
+        const meterA = document.getElementById('meter-a');
+        const meterB = document.getElementById('meter-b');
+        const meterC = document.getElementById('meter-c');
+
+        const protocols = {
+            'l4': {
+                title: '傳統 L4 Load Balancer (TCP層)',
+                desc: 'L4 LB 只看 IP 和 Port，以「TCP 連線 (Connection)」為單位進行分配。<br><br>因為 gRPC 基於 HTTP/2，會重用同一條長連線 (Keep-Alive)。一旦第一條連線被分配給 Server A，客戶端後續成千上萬的 gRPC Request 就會全部沿著這條「唯一的水管」湧向 Server A。<br><br><span class="text-red-400 font-bold">結果：嚴重的流量傾斜，打爆單一伺服器。</span>',
+                themeClass: 'bg-red-600/80 hover:bg-red-500 border-red-500',
+                titleColor: 'text-red-400'
+            },
+            'l7': {
+                title: 'L7 Load Balancer (Proxy 模式)',
+                desc: 'L7 LB (如 Nginx, Envoy, AWS ALB) 能夠「拆開」封包看到裡面的內容。它會作為中間人終止客戶端的 TCP 連線，然後解析出 HTTP/2 裡面的每一個獨立 gRPC Request。<br><br>接著，L7 LB 會在自己與後端 Server 群之間建立多條連線，將解開的 Request 以 Round-Robin (輪詢) 的方式均勻打散。<br><br><span class="text-cyan-400 font-bold">缺點：多了一層代理，增加網路延遲 (多了一跳)。</span>',
+                themeClass: 'bg-cyan-600 hover:bg-cyan-500 border-cyan-500',
+                titleColor: 'text-cyan-400'
+            },
+            'client': {
+                title: 'Client-side Load Balancing',
+                desc: '拿掉中間的 LB 硬體！直接讓「發起請求的客戶端 (gRPC Client 函式庫)」變得聰明。客戶端會先去查詢服務註冊中心 (Service Registry，如 Consul, ETCD) 拿到所有可用 Server 的 IP 清單。<br><br>接著，客戶端自己直接與 Server A, B, C 分別建立長連線，並在發送 Request 時自己做輪詢 (Round-Robin) 分發。<br><br><span class="text-emerald-400 font-bold">優點：效能最高 (少一跳)。缺點：每個語言的 Client 都要寫一套邏輯，維護成本高。</span>',
+                themeClass: 'bg-emerald-600 hover:bg-emerald-500 border-emerald-500',
+                titleColor: 'text-emerald-400'
+            },
+            'mesh': {
+                title: 'Service Mesh (Sidecar 模式)',
+                desc: '現代微服務的終極解法 (如 Istio, Linkerd)。開發者不用改程式碼，而是在每個 Client 旁邊塞一個隱形的代理小程式 (Sidecar Envoy Proxy)。<br><br>Client 以為自己只把 Request 發給 localhost，但其實被旁邊的 Sidecar 攔截。Sidecar 負責從控制平面拉取 Server 名單，幫你做高級的 L7 負載均衡、重試、加密。<br><br><span class="text-purple-400 font-bold">優點：程式碼零侵入，強大的流量控制。</span>',
+                themeClass: 'bg-purple-600 hover:bg-purple-500 border-purple-500',
+                titleColor: 'text-purple-400'
+            }
+        };
+
+        let currentMode = 'l4';
+        let isRunning = false;
+        let animationId;
+        let requests = [];
+        let connections = [];
+        
+        // 負載統計
+        let serverLoad = { A: 0, B: 0, C: 0 };
+        const MAX_LOAD = 40; // 達到此數量算 100% 滿載
+
+        function resizeCanvas() {
+            const rect = container.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            ctx.scale(dpr, dpr);
+            canvas.logicalWidth = rect.width;
+            canvas.logicalHeight = rect.height;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // 節點座標配置
+        const getPositions = () => {
+            const w = canvas.logicalWidth;
+            const h = canvas.logicalHeight;
+            const cy = h / 2 + 20;
+            return {
+                client: { x: 120, y: cy },
+                sidecar: { x: 220, y: cy },
+                lb: { x: w / 2, y: cy },
+                serverA: { x: w - 120, y: cy - 120 },
+                serverB: { x: w - 120, y: cy },
+                serverC: { x: w - 120, y: cy + 120 },
+                registry: { x: w / 2, y: 80 }
+            };
+        };
+
+        // --- 繪製類別 ---
+
+        class ConnectionLine {
+            constructor(startX, startY, endX, endY, isActive = true) {
+                this.sx = startX; this.sy = startY;
+                this.ex = endX; this.ey = endY;
+                this.isActive = isActive;
+            }
+            draw(ctx) {
+                ctx.beginPath();
+                ctx.moveTo(this.sx, this.sy);
+                ctx.lineTo(this.ex, this.ey);
+                ctx.lineWidth = 12;
+                ctx.strokeStyle = this.isActive ? '#334155' : '#1e293b';
+                ctx.stroke();
+                
+                // 畫箭頭
+                if (this.isActive) {
+                    const angle = Math.atan2(this.ey - this.sy, this.ex - this.sx);
+                    ctx.beginPath();
+                    ctx.moveTo(this.ex - 15 * Math.cos(angle - Math.PI/6), this.ey - 15 * Math.sin(angle - Math.PI/6));
+                    ctx.lineTo(this.ex, this.ey);
+                    ctx.lineTo(this.ex - 15 * Math.cos(angle + Math.PI/6), this.ey - 15 * Math.sin(angle + Math.PI/6));
+                    ctx.strokeStyle = '#475569';
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                }
+            }
+        }
+
+        class RequestPoint {
+            constructor(path, targetServer, speed = 4) {
+                this.path = path; // [{x, y}, {x, y}, ...] 轉折點陣列
+                this.targetServer = targetServer; // 'A', 'B', 'C'
+                this.speed = speed;
+                this.currentPathIndex = 0;
+                this.x = path[0].x;
+                this.y = path[0].y;
+                this.finished = false;
+                this.history = [];
+            }
+
+            update() {
+                if (this.finished) return;
+
+                this.history.push({x: this.x, y: this.y});
+                if (this.history.length > 5) this.history.shift();
+
+                const target = this.path[this.currentPathIndex + 1];
+                if (!target) {
+                    this.finished = true;
+                    // 增加伺服器負載
+                    serverLoad[this.targetServer]++;
+                    updateMeters();
+                    return;
+                }
+
+                const dx = target.x - this.x;
+                const dy = target.y - this.y;
+                const dist = Math.hypot(dx, dy);
+
+                if (dist <= this.speed) {
+                    this.x = target.x;
+                    this.y = target.y;
+                    this.currentPathIndex++;
+                } else {
+                    this.x += (dx / dist) * this.speed;
+                    this.y += (dy / dist) * this.speed;
+                }
+            }
+
+            draw(ctx) {
+                if (this.finished) return;
+
+                // 畫尾巴
+                if (this.history.length > 0) {
+                    ctx.beginPath();
+                    ctx.moveTo(this.history[0].x, this.history[0].y);
+                    for(let i=1; i<this.history.length; i++) ctx.lineTo(this.history[i].x, this.history[i].y);
+                    ctx.lineTo(this.x, this.y);
+                    ctx.strokeStyle = '#06b6d4'; // Cyan
+                    ctx.globalAlpha = 0.5;
+                    ctx.lineWidth = 4;
+                    ctx.stroke();
+                    ctx.globalAlpha = 1.0;
+                }
+
+                // 畫亮點
+                ctx.fillStyle = '#22d3ee';
+                ctx.shadowColor = '#06b6d4';
+                ctx.shadowBlur = 10;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        // --- 繪圖核心 ---
+
+        function drawNode(ctx, x, y, label, sublabel, color, type = 'box') {
+            ctx.fillStyle = color.bg;
+            ctx.strokeStyle = color.border;
+            ctx.lineWidth = 2;
+            ctx.shadowColor = 'rgba(0,0,0,0.3)';
+            ctx.shadowBlur = 10;
+            ctx.shadowOffsetY = 4;
+
+            if (type === 'box') {
+                ctx.beginPath();
+                ctx.roundRect(x - 50, y - 40, 100, 80, 8);
+                ctx.fill(); ctx.stroke();
+            } else if (type === 'hex') {
+                // LB 形狀
+                ctx.beginPath();
+                const r = 45;
+                for (let i = 0; i < 6; i++) {
+                    const angle = 2 * Math.PI / 6 * i;
+                    const px = x + r * Math.cos(angle);
+                    const py = y + r * Math.sin(angle);
+                    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.closePath();
+                ctx.fill(); ctx.stroke();
+                
+                // 畫一個齒輪或路由標記
+                ctx.fillStyle = color.text;
+                ctx.beginPath(); ctx.arc(x, y - 10, 8, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = color.bg;
+                ctx.beginPath(); ctx.arc(x, y - 10, 4, 0, Math.PI*2); ctx.fill();
+            } else if (type === 'sidecar') {
+                ctx.beginPath();
+                ctx.roundRect(x - 30, y - 30, 60, 60, 6);
+                ctx.fill(); ctx.stroke();
+                // 虛線連接 Client
+                ctx.beginPath();
+                ctx.moveTo(x - 30, y);
+                ctx.lineTo(x - 70, y);
+                ctx.strokeStyle = color.border;
+                ctx.setLineDash([5, 5]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+
+            ctx.fillStyle = color.text;
+            ctx.font = 'bold 13px sans-serif';
+            ctx.textAlign = 'center';
+            if (type === 'sidecar') {
+                ctx.fillText(label, x, y + 5);
+                ctx.font = '10px sans-serif';
+                ctx.fillText(sublabel, x, y + 20);
+            } else {
+                ctx.fillText(label, x, y + 10);
+                if (sublabel) {
+                    ctx.fillStyle = color.subtext || '#9ca3af';
+                    ctx.font = '11px monospace';
+                    ctx.fillText(sublabel, x, y + 25);
+                }
+            }
+            
+            // 如果是伺服器，畫狀態燈號
+            if (label.startsWith('Server')) {
+                const srv = label.split(' ')[1];
+                let loadPct = Math.min(100, (serverLoad[srv] / MAX_LOAD) * 100);
+                let lightColor = '#10b981'; // Green
+                if (loadPct > 85) lightColor = '#ef4444'; // Red
+                else if (loadPct > 60) lightColor = '#f59e0b'; // Yellow
+                
+                ctx.fillStyle = lightColor;
+                ctx.shadowColor = lightColor;
+                ctx.shadowBlur = 8;
+                ctx.beginPath(); ctx.arc(x - 35, y - 25, 4, 0, Math.PI*2); ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        function drawScene() {
+            if(!canvas.logicalWidth) return;
+            ctx.clearRect(0, 0, canvas.logicalWidth, canvas.logicalHeight);
+            
+            const pos = getPositions();
+
+            // 1. 繪製連線管線
+            connections.forEach(c => c.draw(ctx));
+
+            // 2. 繪製流動的 gRPC Request
+            requests.forEach(r => { r.update(); r.draw(ctx); });
+
+            // 清理完成的 request
+            requests = requests.filter(r => !r.finished);
+
+            // 3. 繪製節點 (蓋在管線上)
+            const cClient = { bg: '#1e3a8a', border: '#3b82f6', text: '#e0e7ff', subtext: '#93c5fd' };
+            const cServer = { bg: '#4c1d95', border: '#8b5cf6', text: '#ede9fe', subtext: '#c4b5fd' };
+            const cLB = { bg: '#064e3b', border: '#10b981', text: '#d1fae5' };
+            const cLBDumb = { bg: '#7f1d1d', border: '#ef4444', text: '#fee2e2' };
+            const cSidecar = { bg: '#4c1d95', border: '#a855f7', text: '#f3e8ff' };
+            const cReg = { bg: '#374151', border: '#6b7280', text: '#d1d5db' };
+
+            if (currentMode === 'l4') {
+                drawNode(ctx, pos.client.x, pos.client.y, 'gRPC Client', '發送請求', cClient);
+                drawNode(ctx, pos.lb.x, pos.lb.y, 'L4 LB', '只看TCP/IP', cLBDumb, 'hex');
+            } else if (currentMode === 'l7') {
+                drawNode(ctx, pos.client.x, pos.client.y, 'gRPC Client', '發送請求', cClient);
+                drawNode(ctx, pos.lb.x, pos.lb.y, 'L7 LB / Proxy', '拆解 HTTP/2', cLB, 'hex');
+            } else if (currentMode === 'client') {
+                drawNode(ctx, pos.client.x, pos.client.y, 'gRPC Client', '內建負載均衡', cClient);
+                drawNode(ctx, pos.registry.x, pos.registry.y, 'Service Registry', '(如 Consul)', cReg);
+            } else if (currentMode === 'mesh') {
+                drawNode(ctx, pos.client.x - 30, pos.client.y, 'App Container', '', cClient);
+                drawNode(ctx, pos.sidecar.x, pos.sidecar.y, 'Envoy', 'Sidecar', cSidecar, 'sidecar');
+                drawNode(ctx, pos.registry.x, pos.registry.y, 'Control Plane', '配發路由規則', cReg);
+            }
+
+            drawNode(ctx, pos.serverA.x, pos.serverA.y, 'Server A', 'gRPC Service', cServer);
+            drawNode(ctx, pos.serverB.x, pos.serverB.y, 'Server B', 'gRPC Service', cServer);
+            drawNode(ctx, pos.serverC.x, pos.serverC.y, 'Server C', 'gRPC Service', cServer);
+        }
+
+        function animationLoop() {
+            drawScene();
+            if (isRunning) animationId = requestAnimationFrame(animationLoop);
+        }
+
+        // --- 負載狀態更新 ---
+
+        function updateMeters() {
+            ['A', 'B', 'C'].forEach(srv => {
+                const meter = document.getElementById(`meter-${srv.toLowerCase()}`);
+                let loadPct = (serverLoad[srv] / MAX_LOAD) * 100;
+                if (loadPct > 100) loadPct = 100;
+                
+                meter.style.height = `${loadPct}%`;
+                
+                // 顏色變化
+                if (loadPct > 85) {
+                    meter.className = 'absolute bottom-0 left-0 right-0 server-bar bg-red-500';
+                    meter.parentElement.classList.add('pulse-red');
+                } else if (loadPct > 60) {
+                    meter.className = 'absolute bottom-0 left-0 right-0 server-bar bg-yellow-500';
+                    meter.parentElement.classList.remove('pulse-red');
+                } else {
+                    meter.className = 'absolute bottom-0 left-0 right-0 server-bar bg-emerald-500';
+                    meter.parentElement.classList.remove('pulse-red');
+                }
+            });
+        }
+
+        // --- 模擬邏輯 ---
+
+        function buildConnections() {
+            connections = [];
+            const pos = getPositions();
+            
+            if (currentMode === 'l4') {
+                // Client 到 LB (一條粗管線)
+                connections.push(new ConnectionLine(pos.client.x, pos.client.y, pos.lb.x, pos.lb.y, true));
+                // LB 到 Server A (L4 把這條長連線綁定在 A 上)
+                connections.push(new ConnectionLine(pos.lb.x, pos.lb.y, pos.serverA.x, pos.serverA.y, true));
+                // B, C 雖然有接線，但是空的閒置連線
+                connections.push(new ConnectionLine(pos.lb.x, pos.lb.y, pos.serverB.x, pos.serverB.y, false));
+                connections.push(new ConnectionLine(pos.lb.x, pos.lb.y, pos.serverC.x, pos.serverC.y, false));
+            } 
+            else if (currentMode === 'l7') {
+                // Client 到 LB (一條)
+                connections.push(new ConnectionLine(pos.client.x, pos.client.y, pos.lb.x, pos.lb.y, true));
+                // LB 到 Server A, B, C (三條活動管線，因為 L7 LB 自己維持了連接池)
+                connections.push(new ConnectionLine(pos.lb.x, pos.lb.y, pos.serverA.x, pos.serverA.y, true));
+                connections.push(new ConnectionLine(pos.lb.x, pos.lb.y, pos.serverB.x, pos.serverB.y, true));
+                connections.push(new ConnectionLine(pos.lb.x, pos.lb.y, pos.serverC.x, pos.serverC.y, true));
+            }
+            else if (currentMode === 'client') {
+                // Client 直接打到 Server A, B, C
+                connections.push(new ConnectionLine(pos.client.x, pos.client.y, pos.serverA.x, pos.serverA.y, true));
+                connections.push(new ConnectionLine(pos.client.x, pos.client.y, pos.serverB.x, pos.serverB.y, true));
+                connections.push(new ConnectionLine(pos.client.x, pos.client.y, pos.serverC.x, pos.serverC.y, true));
+                // Client 去問 Registry (虛線示意)
+                let cReg = new ConnectionLine(pos.client.x, pos.client.y, pos.registry.x, pos.registry.y, false);
+                connections.push(cReg);
+            }
+            else if (currentMode === 'mesh') {
+                // Sidecar 到 Server A, B, C
+                connections.push(new ConnectionLine(pos.sidecar.x, pos.sidecar.y, pos.serverA.x, pos.serverA.y, true));
+                connections.push(new ConnectionLine(pos.sidecar.x, pos.sidecar.y, pos.serverB.x, pos.serverB.y, true));
+                connections.push(new ConnectionLine(pos.sidecar.x, pos.sidecar.y, pos.serverC.x, pos.serverC.y, true));
+                // Sidecar 去問 Registry
+                connections.push(new ConnectionLine(pos.sidecar.x, pos.sidecar.y, pos.registry.x, pos.registry.y, false));
+            }
+        }
+
+        let emissionInterval;
+        let lbIndex = 0;
+
+        function startEmitting() {
+            serverLoad = { A: 0, B: 0, C: 0 };
+            updateMeters();
+            requests = [];
+            lbIndex = 0;
+            if (emissionInterval) clearInterval(emissionInterval);
+            
+            const pos = getPositions();
+            let count = 0;
+            const totalRequests = 60; // 模擬發送一波 60 個 Request
+
+            // 關閉按鈕，避免重複按
+            const btnStart = document.getElementById('btn-start');
+            btnStart.disabled = true;
+            btnStart.innerHTML = '流量湧入中... <span class="animate-pulse">🔥</span>';
+            btnStart.className = 'w-full bg-gray-600 cursor-not-allowed py-3 rounded-lg font-bold text-base transition-all text-white opacity-50';
+
+            emissionInterval = setInterval(() => {
+                if (count >= totalRequests) {
+                    clearInterval(emissionInterval);
+                    setTimeout(() => {
+                        btnStart.disabled = false;
+                        btnStart.innerHTML = '重置並發送請求 ↺';
+                        btnStart.className = 'w-full bg-cyan-600 hover:bg-cyan-500 py-3 rounded-lg font-bold text-base transition-all shadow-[0_0_15px_rgba(8,145,178,0.4)] text-white';
+                    }, 2000); // 等最後一顆子彈飛完
+                    return;
+                }
+
+                let targetServer = 'A';
+                let path = [];
+
+                if (currentMode === 'l4') {
+                    // L4 LB: 悲劇發生，所有的 Request (Stream) 都在最初建立的 TCP 連線上，全部擠向 Server A
+                    targetServer = 'A';
+                    path = [{x: pos.client.x, y: pos.client.y}, {x: pos.lb.x, y: pos.lb.y}, {x: pos.serverA.x, y: pos.serverA.y}];
+                } 
+                else if (currentMode === 'l7') {
+                    // L7 LB: 拆開連線，幫忙 Round Robin
+                    const servers = ['A', 'B', 'C'];
+                    targetServer = servers[lbIndex % 3];
+                    const dest = targetServer === 'A' ? pos.serverA : targetServer === 'B' ? pos.serverB : pos.serverC;
+                    path = [{x: pos.client.x, y: pos.client.y}, {x: pos.lb.x, y: pos.lb.y}, {x: dest.x, y: dest.y}];
+                    lbIndex++;
+                }
+                else if (currentMode === 'client') {
+                    // Client-side LB: 客戶端自己 Round Robin
+                    const servers = ['A', 'B', 'C'];
+                    targetServer = servers[lbIndex % 3];
+                    const dest = targetServer === 'A' ? pos.serverA : targetServer === 'B' ? pos.serverB : pos.serverC;
+                    path = [{x: pos.client.x, y: pos.client.y}, {x: dest.x, y: dest.y}];
+                    lbIndex++;
+                }
+                else if (currentMode === 'mesh') {
+                    // Service Mesh: Sidecar 幫忙 Round Robin
+                    const servers = ['A', 'B', 'C'];
+                    targetServer = servers[lbIndex % 3];
+                    const dest = targetServer === 'A' ? pos.serverA : targetServer === 'B' ? pos.serverB : pos.serverC;
+                    path = [{x: pos.client.x-30, y: pos.client.y}, {x: pos.sidecar.x, y: pos.sidecar.y}, {x: dest.x, y: dest.y}];
+                    lbIndex++;
+                }
+
+                requests.push(new RequestPoint(path, targetServer, 5));
+                count++;
+            }, 50); // 每 50ms 噴一顆
+        }
+
+        // --- UI 控制 ---
+
+        function setMode(m) {
+            currentMode = m;
+            requests = [];
+            serverLoad = { A: 0, B: 0, C: 0 };
+            updateMeters();
+            if (emissionInterval) clearInterval(emissionInterval);
+            
+            buildConnections();
+            
+            // UI 更新
+            document.querySelectorAll('.protocol-btn').forEach(btn => {
+                if (btn.id === `btn-${m}`) {
+                    const theme = protocols[m].themeClass;
+                    btn.className = `protocol-btn w-full text-left px-4 py-3 rounded-lg text-white font-semibold transition-all shadow-md border ${theme} text-sm`;
+                } else {
+                    btn.className = 'protocol-btn w-full text-left px-4 py-3 rounded-lg bg-gray-700 text-gray-300 hover:bg-gray-600 transition-all border border-transparent text-sm';
+                }
+            });
+            
+            const info = protocols[m];
+            document.getElementById('desc-title').innerText = info.title;
+            document.getElementById('desc-title').className = `text-lg font-bold mb-3 ${info.titleColor}`;
+            document.getElementById('desc-text').innerHTML = info.desc;
+            
+            const btnStart = document.getElementById('btn-start');
+            btnStart.disabled = false;
+            btnStart.innerHTML = '發送大量 gRPC 請求 ▶';
+            btnStart.className = 'w-full bg-cyan-600 hover:bg-cyan-500 py-3 rounded-lg font-bold text-base transition-all shadow-[0_0_15px_rgba(8,145,178,0.4)] text-white';
+            
+            if (!isRunning) {
+                isRunning = true;
+                animationLoop();
+            }
+        }
+
+        document.querySelectorAll('.protocol-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => setMode(e.target.id.replace('btn-', '')));
+        });
+        
+        document.getElementById('btn-start').addEventListener('click', startEmitting);
+
+        // 初始化
+        setMode('l4');
+
+    </script>
+</body>
+</html>
