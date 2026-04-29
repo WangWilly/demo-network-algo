@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OSI 網路七層模型互動展示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f3f4f6;
+            margin: 0;
+            overflow-x: hidden;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8; 
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen text-slate-800">
+
+    <header class="bg-indigo-600 text-white p-4 shadow-md flex justify-between items-center z-10 shrink-0">
+        <div class="flex items-center gap-3">
+            <i data-lucide="network" class="w-8 h-8"></i>
+            <div>
+                <h1 class="text-xl font-bold">OSI 網路七層模型互動展示</h1>
+                <p class="text-xs text-indigo-200">透過實際案例了解封裝與解封裝過程</p>
+            </div>
+        </div>
+        <div class="flex gap-2">
+            <button id="btn-prev" class="bg-indigo-700 hover:bg-indigo-800 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition disabled:opacity-50 disabled:cursor-not-allowed">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i> 上一步
+            </button>
+            <button id="btn-next" class="bg-white hover:bg-indigo-50 text-indigo-600 px-4 py-2 rounded-lg flex items-center gap-2 font-semibold shadow transition disabled:opacity-50 disabled:cursor-not-allowed">
+                下一步 <i data-lucide="arrow-right" class="w-4 h-4"></i>
+            </button>
+            <button id="btn-play" class="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 shadow transition">
+                <i data-lucide="play" class="w-4 h-4"></i> 自動播放
+            </button>
+        </div>
+    </header>
+
+    <main class="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
+        <div class="flex-1 relative bg-white lg:border-r border-slate-200 shadow-inner overflow-hidden min-h-[400px]" id="canvas-container">
+            <canvas id="osi-canvas"></canvas>
+            
+            <div class="absolute top-4 left-8 bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-bold shadow-sm flex items-center gap-2">
+                <i data-lucide="laptop" class="w-4 h-4"></i> 傳送端 (Client)
+            </div>
+            <div class="absolute top-4 right-8 bg-purple-100 text-purple-800 px-3 py-1 rounded-full text-sm font-bold shadow-sm flex items-center gap-2">
+                <i data-lucide="server" class="w-4 h-4"></i> 接收端 (Server)
+            </div>
+        </div>
+
+        <div class="w-full lg:w-96 bg-slate-50 flex flex-col shrink-0 z-10 overflow-y-auto">
+            <div class="p-6">
+                <h2 class="text-lg font-bold mb-4 text-slate-700 border-b pb-2 flex items-center gap-2">
+                    <i data-lucide="book-open" class="w-5 h-5 text-indigo-500"></i> 目前步驟說明
+                </h2>
+                
+                <div id="info-panel" class="space-y-4">
+                    <!-- JS 生成 -->
+                </div>
+
+                <div class="mt-8 bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+                    <h3 class="font-bold text-sm text-slate-500 mb-2">案例情境</h3>
+                    <p class="text-sm text-slate-700 leading-relaxed">
+                        小明使用瀏覽器輸入網址，發出一個 <span class="font-bold text-indigo-600">HTTPS 請求 (Hello!)</span> 給遠端的伺服器。我們將觀察這個請求資料如何從軟體層面被包裝，轉變成電子訊號傳輸，最後在伺服器端解開的完整過程。
+                    </p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        lucide.createIcons();
+
+        const osiLayers = [
+            { id: 7, name: "第 7 層：應用層", enName: "Application", color: "#8b5cf6", header: "DATA" },
+            { id: 6, name: "第 6 層：表現層", enName: "Presentation", color: "#ec4899", header: "SSL" },
+            { id: 5, name: "第 5 層：會議層", enName: "Session", color: "#f43f5e", header: "SESS" },
+            { id: 4, name: "第 4 層：傳輸層", enName: "Transport", color: "#f97316", header: "TCP" },
+            { id: 3, name: "第 3 層：網路層", enName: "Network", color: "#eab308", header: "IP" },
+            { id: 2, name: "第 2 層：資料結連層", enName: "Data Link", color: "#22c55e", header: "MAC" },
+            { id: 1, name: "第 1 層：實體層", enName: "Physical", color: "#64748b", header: "BITS" }
+        ];
+
+        const stepDescriptions = [
+            {
+                title: "準備發送資料",
+                layer: "應用層 (Layer 7)",
+                desc: "小明的瀏覽器準備發送 HTTP 請求資料「Hello!」給伺服器。此層提供應用程式存取網路服務的介面。",
+                detail: "協定範例：HTTP, FTP, SMTP, DNS"
+            },
+            {
+                title: "資料格式化與加密",
+                layer: "表現層 (Layer 6)",
+                desc: "將資料進行編碼（例如轉為 UTF-8 字串）。因為是 HTTPS，所以在此進行 SSL/TLS 加密，將明文變成亂碼以保護安全。",
+                detail: "加入資訊：格式化標籤、加密演算法 (SSL Header)"
+            },
+            {
+                title: "建立通訊會話",
+                layer: "會議層 (Layer 5)",
+                desc: "決定是否建立連線、維持連線或中斷連線。為這筆資料綁定一個 Session ID，確保資料傳輸的同步與管理。",
+                detail: "加入資訊：Session ID (SESS Header)"
+            },
+            {
+                title: "切分與加上 Port 號",
+                layer: "傳輸層 (Layer 4)",
+                desc: "將資料切成較小的區段 (Segment)，並加上來源與目的端的連接埠 (Port)。確保資料可靠送達。",
+                detail: "加入資訊：TCP Header (來源 Port: 54321, 目的 Port: 443 HTTPS)"
+            },
+            {
+                title: "加上 IP 位址與路由",
+                layer: "網路層 (Layer 3)",
+                desc: "將區段打包成封包 (Packet)，並加上來源與目的 IP 位址。路由器會根據 IP 決定封包傳遞的最佳路徑。",
+                detail: "加入資訊：IP Header (來源 IP: 192.168.1.5, 目的 IP: 8.8.8.8)"
+            },
+            {
+                title: "加上 MAC 位址與錯誤偵測",
+                layer: "資料結連層 (Layer 2)",
+                desc: "將封包打包成訊框 (Frame)，加上區域網路內的實體網卡位址 (MAC Address)，以及用於檢查資料是否損壞的 FCS (Frame Check Sequence)。",
+                detail: "加入資訊：Ethernet Header (包含來源 MAC 與預設閘道 MAC)"
+            },
+            {
+                title: "轉為數位訊號",
+                layer: "實體層 (Layer 1)",
+                desc: "將含有所有標頭的資料訊框，全部轉換為 0 與 1 的二進位位元流 (Bitstream)，準備透過網路線或 Wi-Fi 傳送。",
+                detail: "型態：電子訊號、光訊號或電磁波"
+            },
+            {
+                title: "網路實體傳輸",
+                layer: "傳輸中...",
+                desc: "光電訊號正透過海底電纜、路由器、交換機等實體媒介，從傳送端高速傳輸到接收端的伺服器。",
+                detail: "狀態：訊號傳遞中 (01011001...)"
+            },
+            {
+                title: "接收數位訊號",
+                layer: "實體層 (Layer 1) - 接收端",
+                desc: "伺服器的網卡接收到實體的電子/光學訊號，並將其還原為 0 與 1 的二進位資料，向上傳遞給資料結連層。",
+                detail: "動作：接收位元流"
+            },
+            {
+                title: "檢查 MAC 位址與除錯",
+                layer: "資料結連層 (Layer 2) - 接收端",
+                desc: "伺服器檢查 Frame 的目的 MAC 位址是否為自己。並透過 FCS 檢查資料在傳輸過程中有無損壞。確認無誤後，剝除 MAC Header，將 Packet 交給上一層。",
+                detail: "動作：剝除 Ethernet Header"
+            },
+            {
+                title: "確認 IP 位址",
+                layer: "網路層 (Layer 3) - 接收端",
+                desc: "伺服器檢查 Packet 的目的 IP 是否為自己的 IP (8.8.8.8)。確認無誤後，剝除 IP Header，將 Segment 交給上一層。",
+                detail: "動作：剝除 IP Header"
+            },
+            {
+                title: "確認 Port 號與重組",
+                layer: "傳輸層 (Layer 4) - 接收端",
+                desc: "伺服器查看 TCP Header，發現目的 Port 是 443，知道這是要給 HTTPS 服務的資料。剝除 TCP Header，確認資料完整性。",
+                detail: "動作：剝除 TCP Header"
+            },
+            {
+                title: "會話狀態確認",
+                layer: "會議層 (Layer 5) - 接收端",
+                desc: "伺服器辨識出這是屬於哪個 Session ID 的通訊連線，維持會話狀態。",
+                detail: "動作：剝除 Session Header"
+            },
+            {
+                title: "資料解密與解碼",
+                layer: "表現層 (Layer 6) - 接收端",
+                desc: "伺服器使用 SSL/TLS 金鑰將加密的資料解密，並將其編碼格式還原，準備交給應用程式。",
+                detail: "動作：解密並剝除 SSL Header"
+            },
+            {
+                title: "應用程式接收資料",
+                layer: "應用層 (Layer 7) - 接收端",
+                desc: "網頁伺服器軟體 (如 Nginx, Apache) 最終收到了原始的「Hello!」HTTP 請求，並準備進行處理與回覆。",
+                detail: "動作：獲得原始 DATA (Hello!)"
+            }
+        ];
+
+        // --- Canvas 與動畫狀態 ---
+        const canvas = document.getElementById('osi-canvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('canvas-container');
+
+        let width, height;
+        
+        const state = {
+            step: 0,           // 0 到 14 (對應 15 個步驟)
+            maxStep: 14,
+            progress: 0,       // 當前步驟的動畫進度 (0.0 到 1.0)
+            isAnimating: false,
+            autoPlay: false,
+            animationSpeed: 0.015, // 每次 requestAnimationFrame 增加的進度
+            lastTime: 0
+        };
+
+        // UI 元素
+        const btnPrev = document.getElementById('btn-prev');
+        const btnNext = document.getElementById('btn-next');
+        const btnPlay = document.getElementById('btn-play');
+        const infoPanel = document.getElementById('info-panel');
+
+        // --- 尺寸與響應式調整 ---
+        function resize() {
+            width = container.clientWidth;
+            height = container.clientHeight;
+            // 為了高解析度螢幕支援
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = width * dpr;
+            canvas.height = height * dpr;
+            ctx.scale(dpr, dpr);
+            draw(); // 重新繪製目前狀態
+        }
+        window.addEventListener('resize', resize);
+
+        // --- 繪製輔助函數 ---
+        
+        // 繪製圓角矩形
+        function roundRect(ctx, x, y, width, height, radius, fill, stroke, strokeWidth) {
+            ctx.beginPath();
+            ctx.moveTo(x + radius, y);
+            ctx.lineTo(x + width - radius, y);
+            ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+            ctx.lineTo(x + width, y + height - radius);
+            ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+            ctx.lineTo(x + radius, y + height);
+            ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+            ctx.lineTo(x, y + radius);
+            ctx.quadraticCurveTo(x, y, x + radius, y);
+            ctx.closePath();
+            
+            if (fill) {
+                ctx.fillStyle = fill;
+                ctx.fill();
+            }
+            if (stroke) {
+                ctx.lineWidth = strokeWidth || 1;
+                ctx.strokeStyle = stroke;
+                ctx.stroke();
+            }
+        }
+
+        // --- 主要繪圖邏輯 ---
+        function draw() {
+            ctx.clearRect(0, 0, width, height);
+
+            const paddingY = 80;
+            const layerHeight = Math.min(45, (height - paddingY * 2) / 8);
+            const layerGap = layerHeight * 0.3;
+            const boxWidth = Math.min(180, width * 0.25);
+            
+            const senderX = width * 0.15;
+            const receiverX = width * 0.85 - boxWidth;
+
+            // 1. 繪製傳送端與接收端的背景七層架構
+            drawStack(senderX, paddingY, boxWidth, layerHeight, layerGap, true);
+            drawStack(receiverX, paddingY, boxWidth, layerHeight, layerGap, false);
+
+            // 2. 繪製連接兩端的實體線路 (虛線或實線)
+            drawPhysicalLink(senderX + boxWidth, receiverX, paddingY + (layerHeight + layerGap) * 6 + layerHeight/2);
+
+            // 3. 繪製動態的資料封包 (根據當前進度)
+            drawPacket(senderX, receiverX, paddingY, boxWidth, layerHeight, layerGap);
+        }
+
+        // 繪製七層堆疊背景
+        function drawStack(startX, startY, width, height, gap, isSender) {
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+
+            osiLayers.forEach((layer, index) => {
+                const y = startY + index * (height + gap);
+                const isActive = isSender ? 
+                    (state.step < 7 && state.step === index) : 
+                    (state.step >= 8 && state.step === 14 - index);
+
+                // 盒子陰影
+                ctx.shadowColor = 'rgba(0,0,0,0.1)';
+                ctx.shadowBlur = 10;
+                ctx.shadowOffsetY = 4;
+
+                // 盒子背景
+                let fillCol = isActive ? layer.color : '#f8fafc';
+                let strokeCol = layer.color;
+                
+                roundRect(ctx, startX, y, width, height, 8, fillCol, strokeCol, 2);
+
+                // 清除陰影
+                ctx.shadowColor = 'transparent';
+
+                // 文字
+                ctx.fillStyle = isActive ? '#ffffff' : '#334155';
+                ctx.font = `bold ${Math.max(12, height * 0.35)}px sans-serif`;
+                ctx.fillText(layer.name, startX + width / 2, y + height / 2);
+            });
+        }
+
+        function drawPhysicalLink(startX, endX, y) {
+            ctx.beginPath();
+            ctx.moveTo(startX + 10, y);
+            ctx.lineTo(endX - 10, y);
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 3;
+            ctx.setLineDash([10, 5]); // 虛線表示網路
+            ctx.stroke();
+            ctx.setLineDash([]); // 恢復實線
+
+            // 加上傳輸方向小箭頭 (裝飾用)
+            if(state.step === 7) {
+                const time = Date.now() / 200;
+                const offset = (time % 20) - 10;
+                ctx.fillStyle = '#64748b';
+                for(let i=startX+40; i<endX-40; i+=40) {
+                    ctx.beginPath();
+                    ctx.moveTo(i + offset, y - 5);
+                    ctx.lineTo(i + 10 + offset, y);
+                    ctx.lineTo(i + offset, y + 5);
+                    ctx.fill();
+                }
+            }
+        }
+
+        // 繪製資料封包與其標頭
+        function drawPacket(senderX, receiverX, startY, stackWidth, layerHeight, layerGap) {
+            const step = state.step;
+            const progress = state.progress; // 0 to 1
+
+            // 計算封包中心點的位置 (X, Y)
+            let pktX = 0, pktY = 0;
+            
+            // 計算目前封裝的層級 (0 到 6 代表加入多少 Header)
+            let currentHeadersCount = 0;
+
+            if (step < 7) {
+                // 傳送端：往下移動 (Encapsulation)
+                pktX = senderX + stackWidth + 20; // 畫在堆疊旁邊
+                
+                const currentY = startY + step * (layerHeight + layerGap) + layerHeight / 2;
+                const nextY = startY + (step + 1) * (layerHeight + layerGap) + layerHeight / 2;
+                
+                // 使用 easeInOut 讓動畫平滑
+                const easeProg = easeInOutCubic(progress);
+                pktY = currentY + (nextY - currentY) * easeProg;
+                
+                // 動畫過程中，進度超過一半才算加上了新的 Header
+                currentHeadersCount = progress > 0.5 ? step + 1 : step;
+                if(step === 6) currentHeadersCount = 6; // 第7層不加 Header，轉換成二進位
+
+            } else if (step === 7) {
+                // 實體層傳輸：從左移動到右
+                const y = startY + 6 * (layerHeight + layerGap) + layerHeight / 2;
+                const startTransX = senderX + stackWidth + 20;
+                const endTransX = receiverX - 20;
+                
+                const easeProg = easeInOutCubic(progress);
+                pktX = startTransX + (endTransX - startTransX) * easeProg;
+                pktY = y;
+                currentHeadersCount = 6; // 全滿
+
+            } else {
+                // 接收端：往上移動 (Decapsulation)
+                pktX = receiverX - 20; // 畫在堆疊左側旁邊
+                
+                // step 8 對應 layer index 6 (最底層) 往上移到 index 5
+                const currentLayerIndex = 14 - step; 
+                const currentY = startY + currentLayerIndex * (layerHeight + layerGap) + layerHeight / 2;
+                const nextY = startY + (currentLayerIndex - 1) * (layerHeight + layerGap) + layerHeight / 2;
+                
+                const easeProg = easeInOutCubic(progress);
+                pktY = currentY + (nextY - currentY) * easeProg;
+
+                // 解封裝：進度過半，拔除一個 Header
+                currentHeadersCount = progress > 0.5 ? currentLayerIndex - 1 : currentLayerIndex;
+                if(step === 14) currentHeadersCount = 0;
+            }
+
+            // --- 實際繪製封包內容 ---
+            drawPacketComponents(pktX, pktY, currentHeadersCount, step);
+        }
+
+        function drawPacketComponents(x, y, headersCount, globalStep) {
+            // 基本大小設定
+            const dataWidth = 60;
+            const headerWidth = 30;
+            const hHeight = 30;
+            
+            let totalWidth = dataWidth + (headersCount * headerWidth);
+            
+            // 對齊方式：傳送端靠左對齊(x是左邊界)，接收端靠右對齊(x是右邊界)
+            // 為了簡化，我們將傳入的 x 視為封包的 "前進端"
+            // 傳送時向右，封包最右邊為 x
+            // 接收時向上，我們統一計算左上角起點
+            let startX = x;
+            if (globalStep >= 8) {
+                startX = x - totalWidth; // 從右邊界推算左邊界
+            } else if(globalStep === 7) {
+                startX = x - totalWidth / 2; // 傳輸時置中於 x
+            }
+            
+            let currentX = startX;
+
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "bold 11px sans-serif";
+
+            // 特殊狀況：如果是 L1 轉換為 Bitstream (Step 6後半, Step 7, Step 8前半)
+            const isBitstream = (globalStep === 6 && state.progress > 0.5) || 
+                                (globalStep === 7) || 
+                                (globalStep === 8 && state.progress < 0.5);
+
+            if (isBitstream) {
+                ctx.fillStyle = '#1e293b';
+                roundRect(ctx, currentX, y - hHeight/2, Math.max(150, totalWidth), hHeight, 4, '#1e293b', null, 0);
+                ctx.fillStyle = '#34d399'; // 螢光綠
+                ctx.font = "bold 14px monospace";
+                // 產生一段閃爍的 01 字串
+                const bits = "01101001 0111000...";
+                ctx.fillText(bits, currentX + Math.max(150, totalWidth)/2, y);
+                return;
+            }
+
+            // 繪製 Headers (反向順序繪製，Mac 在最前面)
+            // osiLayers 的順序是 L7 到 L1，對應 index 0 到 6
+            // headersCount=1 代表有 L6(index 1) 的 header，依此類推
+            
+            for (let i = headersCount; i > 0; i--) {
+                const layerData = osiLayers[i];
+                ctx.fillStyle = layerData.color;
+                
+                // L2 MAC 標頭 (綠色) 放在最前面
+                roundRect(ctx, currentX, y - hHeight/2, headerWidth - 2, hHeight, 4, layerData.color, null, 0);
+                
+                ctx.fillStyle = '#ffffff';
+                ctx.fillText(layerData.header, currentX + (headerWidth-2)/2, y);
+                
+                currentX += headerWidth;
+            }
+
+            // 繪製原始 Data (L7)
+            ctx.fillStyle = osiLayers[0].color;
+            roundRect(ctx, currentX, y - hHeight/2, dataWidth, hHeight, 4, osiLayers[0].color, null, 0);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText("Hello!", currentX + dataWidth/2, y);
+        }
+
+        // 緩動函數 (讓動畫看起來順暢)
+        function easeInOutCubic(x) {
+            return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+        }
+
+        // --- 動畫迴圈 ---
+        function animate(timestamp) {
+            if (!state.lastTime) state.lastTime = timestamp;
+            const dt = timestamp - state.lastTime;
+            state.lastTime = timestamp;
+
+            if (state.isAnimating) {
+                // 根據時間調整進度，確保不同更新率螢幕速度一致
+                state.progress += state.animationSpeed * (dt / 16.6);
+
+                if (state.progress >= 1.0) {
+                    state.progress = 0;
+                    state.step++;
+                    
+                    updateUI();
+
+                    if (state.step > state.maxStep) {
+                        state.step = state.maxStep; // 停在最後一步
+                        state.isAnimating = false;
+                        state.autoPlay = false;
+                        btnPlay.innerHTML = '<i data-lucide="rotate-ccw" class="w-4 h-4"></i> 重新開始';
+                        lucide.createIcons();
+                    } else if (!state.autoPlay) {
+                        state.isAnimating = false;
+                    }
+                }
+                draw();
+            } else if (state.step === 7 && !state.isAnimating) {
+                // 傳輸中如果是暫停狀態，讓箭頭微微閃動，所以也觸發重繪
+                draw(); 
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        // --- UI 更新邏輯 ---
+        function updateUI() {
+            // 更新按鈕狀態
+            btnPrev.disabled = (state.step === 0 && !state.isAnimating);
+            btnNext.disabled = (state.step === state.maxStep && !state.isAnimating);
+
+            // 更新解說面板
+            const currentDesc = stepDescriptions[Math.min(state.step, stepDescriptions.length - 1)];
+            
+            // 判斷目前是發送端、傳輸中還是接收端來決定顏色
+            let badgeColor = 'bg-blue-100 text-blue-800';
+            if(state.step === 7) badgeColor = 'bg-slate-200 text-slate-800';
+            if(state.step >= 8) badgeColor = 'bg-purple-100 text-purple-800';
+
+            infoPanel.innerHTML = `
+                <div class="animate-fade-in">
+                    <div class="inline-block ${badgeColor} text-xs font-bold px-2 py-1 rounded mb-2">
+                        步驟 ${Math.min(state.step + 1, 15)} / 15
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-800 mb-1">${currentDesc.title}</h3>
+                    <p class="text-sm font-semibold text-indigo-600 mb-3">${currentDesc.layer}</p>
+                    <p class="text-slate-600 mb-4 leading-relaxed">${currentDesc.desc}</p>
+                    <div class="bg-indigo-50 border border-indigo-100 rounded p-3 text-sm text-indigo-800">
+                        <i data-lucide="info" class="w-4 h-4 inline-block mr-1 mb-0.5"></i>
+                        ${currentDesc.detail}
+                    </div>
+                </div>
+            `;
+            lucide.createIcons();
+
+            // 如果已經在最後一步，且不是自動播放中，改變播放按鈕文字
+            if (state.step === state.maxStep && !state.autoPlay) {
+                btnPlay.innerHTML = '<i data-lucide="rotate-ccw" class="w-4 h-4"></i> 重新開始';
+                btnPlay.classList.replace('bg-emerald-500', 'bg-indigo-500');
+                btnPlay.classList.replace('hover:bg-emerald-600', 'hover:bg-indigo-600');
+            } else {
+                btnPlay.innerHTML = state.autoPlay ? 
+                    '<i data-lucide="pause" class="w-4 h-4"></i> 暫停' : 
+                    '<i data-lucide="play" class="w-4 h-4"></i> 自動播放';
+                btnPlay.classList.replace('bg-indigo-500', 'bg-emerald-500');
+                btnPlay.classList.replace('hover:bg-indigo-600', 'hover:bg-emerald-600');
+            }
+            lucide.createIcons();
+        }
+
+        // --- 事件監聽 ---
+        btnNext.addEventListener('click', () => {
+            if (state.step < state.maxStep && !state.isAnimating) {
+                state.isAnimating = true;
+                state.autoPlay = false;
+                updateUI();
+            }
+        });
+
+        btnPrev.addEventListener('click', () => {
+            if (state.step > 0 && !state.isAnimating) {
+                state.step--;
+                state.progress = 0; // 取消當前進度，直接倒退
+                updateUI();
+                draw();
+            }
+        });
+
+        btnPlay.addEventListener('click', () => {
+            if (state.step === state.maxStep) {
+                // 重新開始
+                state.step = 0;
+                state.progress = 0;
+                state.autoPlay = true;
+                state.isAnimating = true;
+            } else {
+                // 切換播放/暫停
+                state.autoPlay = !state.autoPlay;
+                state.isAnimating = state.autoPlay;
+            }
+            updateUI();
+        });
+
+        // 加入簡單的 CSS 動畫給動態內容
+        const style = document.createElement('style');
+        style.innerHTML = `
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(5px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            .animate-fade-in {
+                animation: fadeIn 0.3s ease-out forwards;
+            }
+        `;
+        document.head.appendChild(style);
+
+        // 初始化
+        resize();
+        updateUI();
+        requestAnimationFrame(animate);
+
+    </script>
+</body>
+</html>
